@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { readFileSync } from 'node:fs';
 import type { AllowlistDb, MaliciousDb } from '../types.ts';
 
-interface RegistryConfig {
+export interface RegistryConfig {
   /** Upstream registry base URL */
   upstream: string;
   /** Filter out versions published within this many milliseconds */
@@ -29,6 +29,26 @@ interface RegistryConfig {
    * or when unset, those URLs are left pointing at the upstream.
    */
   baseUrl?: string;
+  /**
+   * Overrides the registry's URL prefix and display name. Used to mount several
+   * instances of the same proxy class at different paths — e.g. additional Maven
+   * repositories declared with `--maven-repo <name>=<url>`. Registries with a
+   * fixed name ignore this.
+   */
+  name?: string;
+  /**
+   * Where a Maven-layout registry reads version publish timestamps from:
+   * - "deps-dev" (default): query the deps.dev API. A version deps.dev has no
+   *   record of stays blocked (fail-closed).
+   * - "last-modified": HEAD the version's POM on the upstream and use its
+   *   `Last-Modified` header.
+   *
+   * The two are exclusive. deps.dev only indexes Maven Central, so a repository
+   * other than Central must use "last-modified" — with "deps-dev" every version
+   * would be unknown and its metadata would come back empty. Ignored by
+   * non-Maven registries.
+   */
+  timestampSource?: 'deps-dev' | 'last-modified';
 }
 
 export interface VersionMetadata {
