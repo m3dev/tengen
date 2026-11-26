@@ -252,42 +252,35 @@ describe("MavenRegistryProxy – metadata filtering", () => {
 });
 
 describe("MavenRegistryProxy – checksum endpoints", () => {
-  // The proxy rewrites <lastUpdated> to the latest allowed version's publish
-  // timestamp, so the checksum is computed over that filtered XML, not the raw upstream.
-  function withRolledBackLastUpdated(xml: string): string {
-    return xml.replace(
-      "<lastUpdated>20240201000000</lastUpdated>",
-      "<lastUpdated>20240101000000</lastUpdated>",
-    );
+  // 2.0.0 is inside the cooldown, so the served document differs from the
+  // upstream's and the checksum has to be computed over the served one.
+  const xml = makeXml(["1.0.0", "2.0.0"]);
+  const versions = [
+    { versionKey: { version: "1.0.0" }, publishedAt: new Date(BEFORE_CUTOFF).toISOString() },
+    { versionKey: { version: "2.0.0" }, publishedAt: new Date(AFTER_CUTOFF).toISOString() },
+  ];
+
+  async function servedXml(): Promise<string> {
+    const res = await handle("/com/example/mylib/maven-metadata.xml", xml, versions);
+    const body = vi.mocked(res.send).mock.calls[0][0] as string;
+    expect(body).not.toBe(xml);
+    return body;
   }
 
-  it("returns SHA1 of the filtered XML for .sha1 path", async () => {
-    const xml = makeXml(["1.0.0"]);
-    const expected = createHash("sha1")
-      .update(withRolledBackLastUpdated(xml))
-      .digest("hex");
-    const res = await handle(
-      "/com/example/mylib/maven-metadata.xml.sha1",
-      xml,
-      [{ versionKey: { version: "1.0.0" }, publishedAt: new Date(BEFORE_CUTOFF).toISOString() }],
-    );
-    expect(res.status).toHaveBeenCalledWith(200);
-    const body = vi.mocked(res.send).mock.calls[0][0] as string;
-    expect(body).toBe(expected);
-  });
-
-  it("returns MD5 of the filtered XML for .md5 path", async () => {
-    const xml = makeXml(["1.0.0"]);
-    const expected = createHash("md5")
-      .update(withRolledBackLastUpdated(xml))
-      .digest("hex");
-    const res = await handle("/com/example/mylib/maven-metadata.xml.md5", xml, [
-      { versionKey: { version: "1.0.0" }, publishedAt: new Date(BEFORE_CUTOFF).toISOString() },
-    ]);
-    expect(res.status).toHaveBeenCalledWith(200);
-    const body = vi.mocked(res.send).mock.calls[0][0] as string;
-    expect(body).toBe(expected);
-  });
+  it.each(["sha1", "md5"])(
+    "returns the %s of the filtered XML",
+    async (algorithm) => {
+      const expected = createHash(algorithm).update(await servedXml()).digest("hex");
+      const res = await handle(
+        `/com/example/mylib/maven-metadata.xml.${algorithm}`,
+        xml,
+        versions,
+      );
+      expect(res.status).toHaveBeenCalledWith(200);
+      const body = vi.mocked(res.send).mock.calls[0][0] as string;
+      expect(body).toBe(expected);
+    },
+  );
 
   it("returns 404 for .sha1 when all versions are filtered out", async () => {
     const xml = makeXml(["2.0.0"]);
@@ -509,15 +502,18 @@ describe("MavenRegistryProxy – last-modified timestamp source", () => {
     expect(vi.mocked(axios.head).mock.calls).toHaveLength(3);
   });
 
-  it("skips probing entirely when <lastUpdated> predates the cutoff", async () => {
-    const quiet = makeXml(["1.0.0", "1.1.0"]).replace(
+  function quietXml(versions: string[]): string {
+    return makeXml(versions).replace(
       "<lastUpdated>20240201000000</lastUpdated>",
       "<lastUpdated>20240101000000</lastUpdated>",
     );
+  }
+
+  it("skips probing when the document's Last-Modified and <lastUpdated> predate the cutoff", async () => {
     vi.mocked(axios.get).mockResolvedValue({
       status: 200,
-      data: quiet,
-      headers: {},
+      data: quietXml(["1.0.0", "1.1.0"]),
+      headers: { "last-modified": new Date(BEFORE_CUTOFF).toUTCString() },
     } as any);
 
     const res = makeRes();
@@ -530,6 +526,170 @@ describe("MavenRegistryProxy – last-modified timestamp source", () => {
     const xml = String(vi.mocked(res.send).mock.calls[0]?.[0]);
     expect(xml).toContain("<version>1.0.0</version>");
     expect(xml).toContain("<version>1.1.0</version>");
+  });
+
+  it.each([
+    ["inside the cooldown", { "last-modified": new Date(AFTER_CUTOFF).toUTCString() }],
+    ["missing", {}],
+  ])(
+    "probes every version when the document's Last-Modified is %s, whatever <lastUpdated> says",
+    async (_, headers) => {
+      vi.mocked(axios.get).mockResolvedValue({
+        status: 200,
+        data: quietXml(["1.0.0", "1.1.0"]),
+        headers,
+      } as any);
+      vi.mocked(axios.head).mockImplementation(((url: string) =>
+        Promise.resolve({
+          status: 200,
+          headers: {
+            "last-modified": new Date(
+              url.includes("/1.1.0/") ? AFTER_CUTOFF : BEFORE_CUTOFF,
+            ).toUTCString(),
+          },
+        })) as any);
+
+      const res = makeRes();
+      await lmProxy.handleRequest(
+        makeReq("/com/example/mylib/maven-metadata.xml") as any,
+        res as any,
+      );
+
+      expect(vi.mocked(axios.head).mock.calls).toHaveLength(2);
+      const xml = String(vi.mocked(res.send).mock.calls[0]?.[0]);
+      expect(xml).toContain("<version>1.0.0</version>");
+      expect(xml).not.toContain("<version>1.1.0</version>");
+    },
+  );
+
+  it("excludes a version whose probe fails, without failing the request", async () => {
+    vi.mocked(axios.get).mockResolvedValue({
+      status: 200,
+      data: makeXml(["1.0.0", "1.1.0"]),
+      headers: {},
+    } as any);
+    vi.mocked(axios.head).mockImplementation(((url: string) =>
+      url.includes("/1.1.0/")
+        ? Promise.reject(new Error("socket hang up"))
+        : Promise.resolve({
+            status: 200,
+            headers: { "last-modified": new Date(BEFORE_CUTOFF).toUTCString() },
+          })) as any);
+
+    const res = makeRes();
+    await lmProxy.handleRequest(
+      makeReq("/com/example/mylib/maven-metadata.xml") as any,
+      res as any,
+    );
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    const xml = String(vi.mocked(res.send).mock.calls[0]?.[0]);
+    expect(xml).toContain("<version>1.0.0</version>");
+    expect(xml).not.toContain("<version>1.1.0</version>");
+  });
+
+  it("does not cache a transient probe failure", async () => {
+    vi.mocked(axios.get).mockResolvedValue({
+      status: 200,
+      data: makeXml(["1.0.0"]),
+      headers: {},
+    } as any);
+    vi.mocked(axios.head)
+      .mockResolvedValueOnce({ status: 503, headers: {} } as any)
+      .mockResolvedValue({
+        status: 200,
+        headers: { "last-modified": new Date(BEFORE_CUTOFF).toUTCString() },
+      } as any);
+
+    const first = makeRes();
+    await lmProxy.handleRequest(
+      makeReq("/com/example/mylib/maven-metadata.xml") as any,
+      first as any,
+    );
+    expect(first.status).toHaveBeenCalledWith(404);
+
+    const second = makeRes();
+    await lmProxy.handleRequest(
+      makeReq("/com/example/mylib/maven-metadata.xml") as any,
+      second as any,
+    );
+    expect(second.status).toHaveBeenCalledWith(200);
+    expect(vi.mocked(axios.head).mock.calls).toHaveLength(2);
+  });
+
+  it("checks the shared maven section of the malicious DB", async () => {
+    mockReadFileSync.mockReturnValue(
+      JSON.stringify({
+        maven: { maliciousPackages: [], maliciousVersions: { "com.example:mylib": ["1.0.0"] } },
+      }),
+    );
+    vi.mocked(axios.get).mockResolvedValue({
+      status: 200,
+      data: makeXml(["1.0.0", "1.1.0"]),
+      headers: {},
+    } as any);
+    vi.mocked(axios.head).mockResolvedValue({
+      status: 200,
+      headers: { "last-modified": new Date(BEFORE_CUTOFF).toUTCString() },
+    } as any);
+
+    const res = makeRes();
+    await lmProxy.handleRequest(
+      makeReq("/com/example/mylib/maven-metadata.xml") as any,
+      res as any,
+    );
+
+    const xml = String(vi.mocked(res.send).mock.calls[0]?.[0]);
+    expect(xml).not.toContain("<version>1.0.0</version>");
+    expect(xml).toContain("<version>1.1.0</version>");
+  });
+
+  it("serves the document unchanged when nothing is hidden", async () => {
+    const upstream = makeXml(["1.1.0", "1.0.0"], "1.1.0", "1.1.0");
+    vi.mocked(axios.get).mockResolvedValue({
+      status: 200,
+      data: upstream,
+      headers: {},
+    } as any);
+    vi.mocked(axios.head).mockResolvedValue({
+      status: 200,
+      headers: { "last-modified": new Date(BEFORE_CUTOFF).toUTCString() },
+    } as any);
+
+    const res = makeRes();
+    await lmProxy.handleRequest(
+      makeReq("/com/example/mylib/maven-metadata.xml") as any,
+      res as any,
+    );
+
+    expect(vi.mocked(res.send).mock.calls[0]?.[0]).toBe(upstream);
+  });
+
+  it("never names a SNAPSHOT as <release>", async () => {
+    vi.mocked(axios.get).mockResolvedValue({
+      status: 200,
+      data: makeXml(["1.0.0", "1.1.0-SNAPSHOT", "2.0.0"]),
+      headers: {},
+    } as any);
+    vi.mocked(axios.head).mockImplementation(((url: string) =>
+      Promise.resolve({
+        status: 200,
+        headers: {
+          "last-modified": new Date(
+            url.includes("/2.0.0/") ? AFTER_CUTOFF : BEFORE_CUTOFF,
+          ).toUTCString(),
+        },
+      })) as any);
+
+    const res = makeRes();
+    await lmProxy.handleRequest(
+      makeReq("/com/example/mylib/maven-metadata.xml") as any,
+      res as any,
+    );
+
+    const xml = String(vi.mocked(res.send).mock.calls[0]?.[0]);
+    expect(xml).toContain("<latest>1.1.0-SNAPSHOT</latest>");
+    expect(xml).toContain("<release>1.0.0</release>");
   });
 
   it("caches a probed timestamp across requests", async () => {
@@ -880,6 +1040,22 @@ describe("MavenRegistryProxy – snapshot metadata", () => {
     vi.mocked(axios.get).mockResolvedValue({
       status: 200,
       data: makeSnapshotXml("").replace(/<timestamp>[^<]*<\/timestamp>/, ""),
+      headers: {},
+    } as any);
+
+    const res = makeRes();
+    await proxy.handleRequest(makeReq(SNAPSHOT_PATH) as any, res as any);
+
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  it("blocks a Maven 2 snapshot (no <snapshotVersions>) whose build is newer than the cutoff", async () => {
+    vi.mocked(axios.get).mockResolvedValue({
+      status: 200,
+      data: makeSnapshotXml("")
+        .replace(/<lastUpdated>[^<]*<\/lastUpdated>/, "")
+        .replace(/<snapshotVersions>[\s\S]*<\/snapshotVersions>/, "")
+        .replace("20240101.000000", "20240201.000000"),
       headers: {},
     } as any);
 

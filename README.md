@@ -299,21 +299,23 @@ tengen serve \
   --maven-repo scala-nightlies=https://repo.scala-lang.org/artifactory/maven-nightlies
 ```
 
-`/sbt-releases/...` and `/scala-nightlies/...` then behave exactly like `/maven/...` — same routing, metadata filtering and download gating.
+`/sbt-releases/...` and `/scala-nightlies/...` then behave exactly like `/maven/...` — same routing, metadata filtering and download gating. Malicious-package and allowlist entries are read from the shared `maven` ecosystem key, as for `/maven`.
 
 Names must be a single lowercase path segment and cannot shadow a built-in registry (`npm`, `pypi`, `rubygems`, `go`, `composer`, `maven`, `gradle-plugins`).
 
 **Timestamps outside Central.** These repositories read each version's publish time from the `Last-Modified` header of its POM instead of deps.dev.
 
-`<lastUpdated>` records when the metadata was last rewritten, which is when its newest version appeared, so when that is already past the cooldown every version in the document is older still and none are probed — the common case costs no extra requests at all. Otherwise something landed inside the window and every version is probed, in parallel and through a short-lived cache.
+The metadata document is rewritten whenever a version is added, so when the upstream's own `Last-Modified` for `maven-metadata.xml` is already past the cooldown, every version in it is older still and none are probed — the common case costs no extra requests at all. `<lastUpdated>` can only push that bound later, never earlier, because the deploying client writes it. A document without a `Last-Modified` header, or one rewritten inside the window, has every version probed, in parallel and through a short-lived cache. Concurrent requests for the same file share one probe.
 
 Every version, not just the newest few: `<versions>` is **not** in publication order. A maintenance release lands after the next minor's first prerelease, and `org.apache.logging.log4j:log4j-core` ends its list at a 2024 prerelease while its newest release is from 2026 — so walking the list and stopping at the first old entry would let newer ones through. That matters most for exactly the releases a cooldown is meant to catch, since a security patch to a maintenance branch lands out of order by construction.
 
 Two caveats:
 
 - `Last-Modified` is the file's mtime on the upstream, not a publication date, and the two can be far apart. Artifactory-backed repositories rewrite it on re-sync: within a single version of `ch.epfl.scala:sbt-bloop` on `repo.scala-sbt.org`, `ivy.xml` reports 2018 and the jar reports 2021. Files of the same version need not agree. It is nonetheless the only per-version timestamp a plain Maven repository exposes, and it is monotonic enough for a cooldown of days — just don't read it as provenance.
-- A version whose `Last-Modified` cannot be read is treated as unknown and excluded, the same as with a missing deps.dev record.
-- Ties are normal: a repository that re-syncs stamps every file with the same mtime. When the filtered `<latest>` has to be chosen among versions sharing a timestamp, the document's own ordering decides, where Maven puts the newest last.
+- A version whose `Last-Modified` cannot be read is treated as unknown and excluded, the same as with a missing deps.dev record. Only a definitive answer (200, 404 or 410) is cached; a 429, a 5xx or a network error excludes the version for that request alone.
+- Ties are normal: a repository that re-syncs stamps every file with the same mtime. When the filtered `<latest>` has to be chosen among versions sharing a timestamp, the later entry in the document wins.
+
+When nothing in the document is hidden, it is served unchanged, so the upstream's own `<release>` and `<latest>` stand. When something is, `<latest>` becomes the newest allowed version and `<release>` the newest allowed non-SNAPSHOT version; `<release>` is dropped if there is none.
 
 The same applies to the built-in route when `--maven-upstream` is pointed somewhere other than Central — pass `--maven-timestamp-source last-modified` in that case, otherwise every version comes back unknown and the metadata is served empty.
 
