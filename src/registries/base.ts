@@ -30,10 +30,10 @@ export interface RegistryConfig {
    */
   baseUrl?: string;
   /**
-   * Overrides the registry's URL prefix and display name. Used to mount several
-   * instances of the same proxy class at different paths — e.g. additional Maven
-   * repositories declared with `--maven-repo <name>=<url>`. Registries with a
-   * fixed name ignore this.
+   * Overrides the registry's URL prefix, display name and malicious/allowlist
+   * DB section. Used to mount several instances of the same proxy class at
+   * different paths — e.g. additional Maven repositories declared with
+   * `--maven-repo <name>=<url>`. Registries with a fixed name ignore this.
    */
   name?: string;
   /**
@@ -81,6 +81,7 @@ interface MetadataRouting<MetadataType, VersionMetadataType = VersionMetadata> {
   getVersions: (
     metadata: MetadataType,
     req: Request,
+    upstreamResponse: AxiosResponse<MetadataType, any, {}>,
   ) => Promise<VersionMetadataType[]> | VersionMetadataType[];
   filterMetadata: (
     metadata: MetadataType,
@@ -251,7 +252,7 @@ export abstract class RegistryProxy {
       return;
     }
     const metadata = response.data;
-    const versions = await route.getVersions(metadata, req);
+    const versions = await route.getVersions(metadata, req, response);
     const filteredVersions = this.filterVersions(versions);
     const filteredMetadata = await route.filterMetadata(
       metadata,

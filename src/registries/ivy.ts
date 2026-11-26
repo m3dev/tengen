@@ -1,5 +1,4 @@
 import type { Request, Response } from 'express';
-import axios from 'axios';
 import escapeHtml from 'escape-html';
 import {
   RegistryProxy,
@@ -7,10 +6,8 @@ import {
   type VersionMetadata,
 } from './base.ts';
 import { listFolders, type ArtifactoryEndpoint } from './artifactory.ts';
+import { LastModifiedProbe } from './last-modified.ts';
 import { TtlCache } from './ttl-cache.ts';
-
-/** Upper bound on redirect hops when probing a revision's ivy.xml. */
-const MAX_REDIRECTS = 3;
 
 /**
  * Dating a revision costs one request, and filtering a listing means dating
@@ -21,7 +18,7 @@ const MAX_REDIRECTS = 3;
 const PROBE_CONCURRENCY = 8;
 const CACHE_TTL_MS = 10 * 60 * 1000;
 const CACHE_MAX_ENTRIES = 10_000;
-const probeCache = new TtlCache<Date | null>(CACHE_TTL_MS, CACHE_MAX_ENTRIES);
+const revisionProbe = new LastModifiedProbe(CACHE_TTL_MS, CACHE_MAX_ENTRIES);
 const listingCache = new TtlCache<string[]>(CACHE_TTL_MS, CACHE_MAX_ENTRIES);
 
 /** How many children are inspected to tell a revision directory from any other. */
@@ -29,7 +26,7 @@ const SHAPE_SAMPLE = 3;
 
 /** @internal Reset module-level caches. Used by tests; not part of the public API. */
 export function __resetIvyCachesForTesting() {
-  probeCache.clear();
+  revisionProbe.clear();
   listingCache.clear();
 }
 
@@ -50,9 +47,9 @@ export interface IvyRegistryConfig extends RegistryConfig {
  * — for example
  * `/ch.epfl.scala/sbt-bloop/scala_2.12/sbt_1.0/1.5.6/ivys/ivy.xml`.
  *
- * Every request for a file under a revision is gated on that revision's age,
- * read from the `Last-Modified` of its `ivys/ivy.xml`. Everything else is passed
- * through.
+ * Every request for a file at revision depth is gated on that revision's age,
+ * read from the `Last-Modified` of its `ivys/ivy.xml`. Directory listings are
+ * passed through unless `index` is configured.
  *
  * **Dynamic revisions need `index`.** Ivy has no document listing a module's
  * revisions; a client discovers them by reading the repository's directory
@@ -76,8 +73,8 @@ export interface IvyRegistryConfig extends RegistryConfig {
  * listing's order: in that run Coursier asked for `1.3.4+151-7c324c7c` while the
  * listing ended at `1.3.4+160-681434ff`.
  *
- * Malicious/allowlist lookups use the shared "maven" ecosystem, since OSV tracks
- * JVM artifacts there regardless of repository layout.
+ * Malicious/allowlist lookups read the DB section named after this repository
+ * and match the module's Maven coordinate.
  */
 export class IvyRegistryProxy extends RegistryProxy {
   readonly name: string;
@@ -94,10 +91,6 @@ export class IvyRegistryProxy extends RegistryProxy {
    */
   private get endpoint(): ArtifactoryEndpoint | null {
     return (this.config as IvyRegistryConfig).endpoint ?? null;
-  }
-
-  protected override get dbKey(): string {
-    return 'maven';
   }
 
   protected setRouting() {
@@ -141,7 +134,16 @@ export class IvyRegistryProxy extends RegistryProxy {
 
     const dated = await this.dateRevisions(modulePath, children);
     if (dated.length === 0) {
-      if (await this.holdsRevisions(endpoint, modulePath, children)) {
+      const holdsRevisions = await this.holdsRevisions(
+        endpoint,
+        modulePath,
+        children,
+      );
+      if (holdsRevisions === null) {
+        this.refuseListing(res, modulePath, 'could not be inspected');
+        return;
+      }
+      if (holdsRevisions) {
         this.refuseListing(
           res,
           modulePath,
@@ -176,19 +178,21 @@ export class IvyRegistryProxy extends RegistryProxy {
    * directories (`ivys`, `jars`, …), and nothing else in the layout does.
    *
    * Only the first few children are checked — one answer settles it, and this
-   * runs only when no child could be dated.
+   * runs only when no child could be dated. Null when a child cannot be listed,
+   * since then the question has no answer.
    */
   private async holdsRevisions(
     endpoint: ArtifactoryEndpoint,
     modulePath: string,
     children: string[],
-  ): Promise<boolean> {
+  ): Promise<boolean | null> {
     for (const child of children.slice(0, SHAPE_SAMPLE)) {
       const grandchildren = await this.listChildren(
         endpoint,
         `${modulePath}/${child}`,
       );
-      if (grandchildren?.some(isArtifactTypeDirectory)) return true;
+      if (grandchildren === null) return null;
+      if (grandchildren.some(isArtifactTypeDirectory)) return true;
     }
     return false;
   }
@@ -257,50 +261,28 @@ export class IvyRegistryProxy extends RegistryProxy {
    * `ivys/ivy.xml`. The one date both the download gate and the listing use, so
    * a revision the listing offers is a revision the gate will pass.
    */
-  private async revisionPublished(
-    modulePath: string,
-    revision: string,
-  ): Promise<Date | null> {
-    const key = `${this.name}${modulePath}/${revision}`;
-    const cached = probeCache.get(key);
-    if (cached !== undefined) return cached;
-    const published = await this.headIvyXml(modulePath, revision);
-    probeCache.set(key, published);
-    return published;
-  }
-
-  private async headIvyXml(
+  private revisionPublished(
     modulePath: string,
     revision: string,
   ): Promise<Date | null> {
     const base = this.config.upstream.replace(/\/$/, '');
-    // Follow redirects: repo.scala-sbt.org and repo.typesafe.com both 302 to
-    // the Artifactory instance that actually holds the file.
-    const res = await axios.head(
+    return revisionProbe.get(
+      `${this.name}${modulePath}/${revision}`,
       `${base}${modulePath}/${revision}/ivys/ivy.xml`,
-      { validateStatus: () => true, maxRedirects: MAX_REDIRECTS },
     );
-    if (res.status !== 200) return null;
-    const lastModified = res.headers['last-modified'];
-    if (typeof lastModified !== 'string') return null;
-    const published = new Date(lastModified);
-    if (Number.isNaN(published.getTime())) return null;
-    return published;
   }
 }
 
 /**
  * True for a path that *may* be a directory of revisions: a trailing-slash path
- * that is not itself an artifact-type directory.
+ * at least as deep as `{org}/{module}/`.
  *
- * Only the handler can decide whether it really is one, by looking at the
- * children — see respondRevisionListing.
+ * The path alone cannot say more — a module may itself be named `tasks` — so
+ * the handler decides by looking at the children; see respondRevisionListing.
  */
 function isRevisionListingPath(path: string): boolean {
-  if (!path.endsWith('/') || path === '/') return false;
-  const parts = path.split('/').filter(Boolean);
-  if (parts.length < 2) return false;
-  return !isArtifactTypeDirectory(parts[parts.length - 1]!);
+  if (!path.endsWith('/')) return false;
+  return path.split('/').filter(Boolean).length >= 2;
 }
 
 /**
@@ -322,14 +304,15 @@ function renderListing(entries: string[]): string {
 }
 
 /**
- * True for `{...}/{revision}/{type}s/{file}` — the shape of every Ivy artifact
- * fetch. The `{type}s` segment is Ivy's artifact-type directory (`ivys`, `jars`,
- * `poms`, `srcs`, `docs`, …).
+ * True for any file at `{...}/{revision}/{type}s/{file}` depth or deeper.
+ *
+ * Every such file is gated rather than only known artifact types: an Ivy type
+ * is free-form (`test-jars`, `maven-plugins`, …), and a path outside the layout
+ * has no readable ivy.xml, so it dates as unknown and is refused.
  */
 function isIvyDownloadPath(path: string): boolean {
-  const parts = path.split('/').filter(Boolean);
-  if (parts.length < 4) return false;
-  return isArtifactTypeDirectory(parts[parts.length - 2]!);
+  if (path.endsWith('/')) return false;
+  return path.split('/').filter(Boolean).length >= 4;
 }
 
 /** Ivy's artifact-type directory, one level below a revision: `ivys`, `jars`, … */
@@ -354,15 +337,20 @@ function parseIvyDownloadPath(
 }
 
 /**
- * Build the malicious/allowlist lookup key from a module path.
- *
- * Ivy's first two segments are the organisation and the module; the optional
- * `scala_*` / `sbt_*` segments are cross-version qualifiers, not part of the
+ * Build the malicious/allowlist lookup key from a module path, as the Maven
  * coordinate OSV records.
+ *
+ * Ivy's first two segments are the organisation and the module. sbt publishes
+ * the module's `scala_*` / `sbt_*` cross-version directories to Maven as
+ * artifactId suffixes, so `/ch.epfl.scala/sbt-bloop/scala_2.12/sbt_1.0`
+ * becomes `ch.epfl.scala:sbt-bloop_2.12_1.0`.
  */
 function packageNameFromPath(path: string): string {
-  const parts = path.split('/').filter(Boolean);
-  const org = parts[0] ?? '';
-  const module = parts[1] ?? '';
-  return `${org}:${module}`;
+  const [org = '', module = '', ...rest] = path.split('/').filter(Boolean);
+  const suffix = rest
+    .map((segment) => /^(?:scala|sbt)_(.+)$/.exec(segment)?.[1])
+    .filter((version) => version !== undefined)
+    .map((version) => `_${version}`)
+    .join('');
+  return `${org}:${module}${suffix}`;
 }

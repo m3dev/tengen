@@ -377,6 +377,21 @@ describe("loadConfig", () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
+  it.each([
+    ["--ivy-repo", "x=https://a.example.com/ivy, index=artifactory"],
+    ["--ivy-repo", "x=https://a.example.com/ivy,index=artifactory,foo=bar"],
+    ["--maven-repo", "x=https://a.example.com/m2,index=artifactory"],
+  ])("exits on an unrecognised option in %s %s", (flag, value) => {
+    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit called");
+    });
+
+    expect(() => loadConfig([flag, value])).toThrow("process.exit called");
+    expect(errSpy.mock.calls[0]?.[0]).toContain("unrecognised option");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
   it("applies the same name rules to --ivy-repo", () => {
     const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {

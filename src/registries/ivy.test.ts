@@ -189,6 +189,24 @@ describe("IvyRegistryProxy – downloads", () => {
       `${UPSTREAM}/org.scala-sbt/sbt/1.10.7/ivys/ivy.xml`,
     );
   });
+
+  it("gates a free-form artifact type", async () => {
+    vi.mocked(axios.head).mockResolvedValue({
+      status: 200,
+      headers: { "last-modified": new Date("2024-02-01T00:00:00Z").toUTCString() },
+    } as any);
+
+    const res = makeRes();
+    await proxy.handleRequest(
+      makeReq(`${MODULE}/2.0.0/test-jars/sbt-bloop-tests.jar`) as any,
+      res as any,
+    );
+
+    expect(vi.mocked(axios.head).mock.calls[0]?.[0]).toBe(
+      `${UPSTREAM}${MODULE}/2.0.0/ivys/ivy.xml`,
+    );
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
 });
 
 describe("IvyRegistryProxy – revision listings", () => {
@@ -248,12 +266,12 @@ describe("IvyRegistryProxy – revision listings", () => {
     expect(listingEntries(res)).toEqual(["1.0.0"]);
   });
 
-  it("omits a revision the malicious DB names", async () => {
+  it("omits a revision the repository's own malicious DB section names", async () => {
     mockReadFileSync.mockReturnValue(
       JSON.stringify({
-        maven: {
+        "sbt-plugins": {
           maliciousPackages: [],
-          maliciousVersions: { "ch.epfl.scala:sbt-bloop": ["2.0.0"] },
+          maliciousVersions: { "ch.epfl.scala:sbt-bloop_2.12_1.0": ["2.0.0"] },
         },
       }),
     );
@@ -269,6 +287,27 @@ describe("IvyRegistryProxy – revision listings", () => {
     expect(listingEntries(res)).toEqual(["1.0.0"]);
   });
 
+  it("does not read the maven section, which describes Central", async () => {
+    mockReadFileSync.mockReturnValue(
+      JSON.stringify({
+        maven: {
+          maliciousPackages: [],
+          maliciousVersions: { "ch.epfl.scala:sbt-bloop_2.12_1.0": ["2.0.0"] },
+        },
+      }),
+    );
+    mockFolderInfo(["1.0.0", "2.0.0"]);
+    mockRevisionDates({
+      "1.0.0": "2024-01-01T00:00:00Z",
+      "2.0.0": "2024-01-01T00:00:00Z",
+    });
+
+    const res = makeRes();
+    await withIndex().handleRequest(makeReq(`${MODULE}/`) as any, res as any);
+
+    expect(listingEntries(res)).toEqual(["1.0.0", "2.0.0"]);
+  });
+
   it("refuses rather than serve an unfiltered listing when the API cannot be read", async () => {
     mockFolderInfo(null);
 
@@ -280,6 +319,8 @@ describe("IvyRegistryProxy – revision listings", () => {
   });
 
   it("leaves an artifact-type directory to the passthrough", async () => {
+    mockTree({ [`${MODULE}/1.0.0/jars`]: [] });
+
     const res = makeRes();
     await withIndex().handleRequest(
       makeReq(`${MODULE}/1.0.0/jars/`) as any,
@@ -290,7 +331,22 @@ describe("IvyRegistryProxy – revision listings", () => {
       307,
       `${UPSTREAM}${MODULE}/1.0.0/jars/`,
     );
-    expect(axios.get).not.toHaveBeenCalled();
+  });
+
+  it("filters a module whose name looks like an artifact type", async () => {
+    mockTree({ "/org.scala-sbt/tasks": ["1.0.0", "2.0.0"] });
+    mockRevisionDates({
+      "1.0.0": "2024-01-01T00:00:00Z",
+      "2.0.0": "2024-02-01T00:00:00Z",
+    });
+
+    const res = makeRes();
+    await withIndex().handleRequest(
+      makeReq("/org.scala-sbt/tasks/") as any,
+      res as any,
+    );
+
+    expect(listingEntries(res)).toEqual(["1.0.0"]);
   });
 
   it("offers only revisions a download of them would also pass", async () => {
@@ -389,6 +445,17 @@ describe("IvyRegistryProxy – directories that are not revision listings", () =
     expect(res.status).toHaveBeenCalledWith(502);
     expect(res.redirect).not.toHaveBeenCalled();
     expect(res.send).not.toHaveBeenCalled();
+  });
+
+  it("refuses when no child dates and a child cannot be listed", async () => {
+    mockTree({ [MODULE]: ["1.0.0", "2.0.0"] });
+    vi.mocked(axios.head).mockResolvedValue({ status: 429, headers: {} } as any);
+
+    const res = makeRes();
+    await withIndex().handleRequest(makeReq(`${MODULE}/`) as any, res as any);
+
+    expect(res.status).toHaveBeenCalledWith(502);
+    expect(res.redirect).not.toHaveBeenCalled();
   });
 
   it("still serves an empty listing when every revision is inside the cooldown", async () => {
