@@ -242,6 +242,14 @@ function parseNamedRepos<T extends { name: string; upstream: string }>(
       console.error(`Error: duplicate --${flag} name '${name}'`);
       process.exit(1);
     }
+    // A comma left in the URL is an option this flag does not take, or a
+    // malformed one; accepting it as part of the URL would drop it silently.
+    if (upstream.includes(",")) {
+      console.error(
+        `Error: unrecognised option in --${flag} '${entry}' (a URL is followed only by the options this flag accepts)`,
+      );
+      process.exit(1);
+    }
     try {
       const parsed = new URL(upstream);
       if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
