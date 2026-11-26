@@ -333,11 +333,11 @@ Ivy lays artifacts out as `{org}/{module}(/scala_{v})(/sbt_{v})/{revision}/{type
 
 | Path pattern                                   | Action                                                            |
 | ---------------------------------------------- | ----------------------------------------------------------------- |
-| `/{org}/{module}/…/{revision}/{type}s/{file}`  | Gated on the revision's `ivys/ivy.xml`; 404 if inside the cooldown |
+| `/{org}/{module}/…/{revision}/{type}s/{file}`  | Gated on the revision's `ivys/ivy.xml`; 404 if inside the cooldown or unreadable |
 | `/{org}/{module}/…/` (a revision listing)      | With `index=artifactory`, generated with the allowed revisions only; otherwise passthrough |
 | everything else                                | Passthrough                                                        |
 
-The revision's age comes from one HEAD of its `ivys/ivy.xml`. Redirects are followed: `repo.scala-sbt.org` and `repo.typesafe.com` both 302 to the Artifactory instance that holds the file.
+The revision's age comes from one HEAD of its `ivys/ivy.xml`. Redirects are followed: `repo.scala-sbt.org` and `repo.typesafe.com` both 302 to the Artifactory instance that holds the file. Every file four or more segments deep is gated this way, whatever its `{type}s` directory is called, since an Ivy type is free-form; a path outside the layout has no readable `ivy.xml` and is refused.
 
 **Dynamic revisions need `index=artifactory`.** Ivy has no document listing a module's revisions — the equivalent of `maven-metadata.xml` does not exist. A client discovers them by reading the repository's directory index, which is HTML: presentation rather than protocol, differing between Artifactory, Nexus 2, Nexus 3 and Clojars. tengen does not read it. What it can do is answer that request itself from structured data, and `index=artifactory` says to.
 
@@ -374,7 +374,7 @@ GET /ch.epfl.scala/sbt-bloop/…/sbt_1.0/         200   filtered (this is where 
 GET /ch.epfl.scala/sbt-bloop/…/1.5.6/           307   passthrough (ivys, jars)
 ```
 
-If no child dates but the storage API says the children *do* hold artifact-type directories, they are revisions whose `ivy.xml` could not be read — that is answered with 502, never passed through. A directory whose revisions all sit inside the cooldown is a different case: they date fine, so the answer is a listing with nothing in it.
+If no child dates but the storage API says the children *do* hold artifact-type directories, they are revisions whose `ivy.xml` could not be read — that is answered with 502, never passed through. The same goes when a child cannot be listed at all. A directory whose revisions all sit inside the cooldown is a different case: they date fine, so the answer is a listing with nothing in it.
 
 Same repository, same `--delay-days 3000`, Coursier resolved `latest.integration` to `1.0.0-RC1+4-c5e24b66` and fetched the jar.
 
@@ -397,7 +397,7 @@ The option is neither version-pinned nor host-pinned: the fields used here — `
 
 Which revision the resolver picks out of the listing is its own version ordering, not the listing's order: without an index, in the run above, Coursier asked for `1.3.4+151-7c324c7c` while the listing ended at `1.3.4+160-681434ff`.
 
-Malicious and allowlist lookups use the shared `maven` ecosystem, since OSV tracks JVM artifacts there regardless of repository layout.
+Malicious and allowlist lookups use the shared `maven` ecosystem, since OSV tracks JVM artifacts there regardless of repository layout. The package name is the module's Maven coordinate: sbt publishes the `scala_*` / `sbt_*` cross-version directories to Maven as artifactId suffixes, so `/ch.epfl.scala/sbt-bloop/scala_2.12/sbt_1.0/…` is looked up as `ch.epfl.scala:sbt-bloop_2.12_1.0`.
 
 ### Gradle Plugin Portal
 
