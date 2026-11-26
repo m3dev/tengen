@@ -211,6 +211,22 @@ describe("MavenRegistryProxy – metadata filtering", () => {
     expect(body).not.toContain("<lastUpdated>20240201000000</lastUpdated>");
   });
 
+  it("updates the top-level <version> to the latest allowed version", async () => {
+    const xml = makeXml(["1.0.0", "1.1.0", "2.0.0"]).replace(
+      "<versioning>",
+      "<version>2.0.0</version>\n  <versioning>",
+    );
+    const res = await handle("/com/example/mylib/maven-metadata.xml", xml, [
+      { versionKey: { version: "1.0.0" }, publishedAt: new Date(BEFORE_CUTOFF).toISOString() },
+      { versionKey: { version: "1.1.0" }, publishedAt: new Date(BEFORE_CUTOFF + 1000).toISOString() },
+      { versionKey: { version: "2.0.0" }, publishedAt: new Date(AFTER_CUTOFF).toISOString() },
+    ]);
+    const body = vi.mocked(res.send).mock.calls[0][0] as string;
+    expect(body).toMatch(/<artifactId>mylib<\/artifactId>\s*<version>1\.1\.0<\/version>\s*<versioning>/);
+    expect(body).toContain("    <version>1.0.0</version>");
+    expect(body).not.toContain("2.0.0");
+  });
+
   it("returns 404 when all versions are filtered out", async () => {
     const xml = makeXml(["2.0.0"]);
     const res = await handle("/com/example/mylib/maven-metadata.xml", xml, [
