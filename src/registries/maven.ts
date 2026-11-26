@@ -39,17 +39,14 @@ const PROBE_TTL_MS = 10 * 60 * 1000;
 const PROBE_CACHE_MAX = 10_000;
 
 /**
- * Probes keyed by URL and shared across registry instances. Version probes for
- * metadata and per-file probes for the download gate are cached apart, so a
- * build that downloads many files does not evict the version timestamps.
+ * Version timestamps keyed by URL and shared across registry instances. The
+ * metadata filter and the download gate read the same entries.
  */
 const versionProbe = new LastModifiedProbe(PROBE_TTL_MS, PROBE_CACHE_MAX);
-const downloadProbe = new LastModifiedProbe(PROBE_TTL_MS, PROBE_CACHE_MAX);
 
-/** @internal Reset the probe caches. Used by tests; not part of the public API. */
+/** @internal Reset the probe cache. Used by tests; not part of the public API. */
 export function __resetProbeCacheForTesting() {
   versionProbe.clear();
-  downloadProbe.clear();
 }
 
 /** Upper bound on redirect hops when resolving metadata. */
@@ -64,11 +61,6 @@ export class MavenRegistryProxy extends RegistryProxy {
   constructor(config: RegistryConfig) {
     super(config);
     this.name = config.name ?? 'maven';
-  }
-
-  /** OSV tracks every JVM artifact under Maven, whichever repository serves it. */
-  protected override get dbKey(): string {
-    return 'maven';
   }
 
   /**
@@ -116,12 +108,13 @@ export class MavenRegistryProxy extends RegistryProxy {
     const packageName = `${groupId}:${artifactId}`;
 
     if (this.timestampSource === 'last-modified') {
-      // Probe the requested file itself rather than a constructed POM path: a
-      // snapshot artifact is named {artifact}-{version}-{timestamp}-{build}.ext
-      // and has no {artifact}-{version}.pom beside it, so deriving the POM name
-      // would 404 and block every snapshot download.
-      const url = `${this.config.upstream.replace(/\/$/, '')}${req.path}`;
-      const published = await downloadProbe.get(url, url);
+      // Files of one version can carry different mtimes, so every file is
+      // dated by the same probe the metadata filter uses for its version.
+      const published = await this.fetchPublishedViaLastModified(
+        groupId,
+        artifactId,
+        version,
+      );
       if (!published) return null;
       return { packageName, version, published };
     }
@@ -198,10 +191,14 @@ export class MavenRegistryProxy extends RegistryProxy {
     documentModified: unknown,
   ): Promise<VersionMetadata[]> {
     // A version-level maven-metadata.xml describes one timestamped SNAPSHOT
-    // build and carries its own timestamp, so it needs neither deps.dev nor a
-    // probe.
+    // build. Its own Last-Modified dates it, the same value the artifact-level
+    // filter and the download gate read for this version.
     if (isSnapshotMetadata(metadata)) {
-      return snapshotVersions(metadata, getXmlPath(req.path));
+      return snapshotVersions(
+        metadata,
+        getXmlPath(req.path),
+        parseHttpDate(documentModified),
+      );
     }
 
     // Group-level metadata lists plugins/artifacts without <versions> — skip search
@@ -344,13 +341,14 @@ export class MavenRegistryProxy extends RegistryProxy {
     if (!metadata.includes('<versions>')) return metadata;
     const listed = parseVersionsFromXml(metadata);
     const allowed = new Set(allowedVersions.map((v) => v.version));
-    // With nothing hidden, the upstream's own <release> and <latest> stand.
     if (listed.length > 0 && listed.every((v) => allowed.has(v))) {
       return metadata;
     }
 
+    // The upstream's <release> and <latest> stand while they are still
+    // allowed. Only a hidden one is replaced, by the newest allowed version.
     // Ties on `published` are common with the last-modified source, since a
-    // repository that re-syncs stamps every file alike. The later entry in the
+    // repository that re-syncs stamps every file alike; the later entry in the
     // document wins a tie.
     const order = new Map(listed.map((v, i) => [v, i] as const));
     const newest = (candidates: VersionMetadata[]) =>
@@ -362,17 +360,28 @@ export class MavenRegistryProxy extends RegistryProxy {
           ? v
           : acc;
       }, null);
-    const latestEntry = newest(allowedVersions);
-    const releaseEntry = newest(
-      allowedVersions.filter((v) => !v.version.endsWith('-SNAPSHOT')),
-    );
+    const newestEntry = newest(allowedVersions);
+    const upstreamLatest = readVersioningTag(metadata, 'latest');
+    const latest =
+      upstreamLatest && allowed.has(upstreamLatest)
+        ? upstreamLatest
+        : (newestEntry?.version ?? '');
+    const upstreamRelease = readVersioningTag(metadata, 'release');
+    const release =
+      upstreamRelease &&
+      allowed.has(upstreamRelease) &&
+      !upstreamRelease.endsWith('-SNAPSHOT')
+        ? upstreamRelease
+        : (newest(
+            allowedVersions.filter((v) => !v.version.endsWith('-SNAPSHOT')),
+          )?.version ?? null);
     return (
       filterMavenMetadataXml(
         metadata,
         allowed,
-        latestEntry?.version ?? '',
-        releaseEntry?.version ?? null,
-        latestEntry?.published,
+        latest,
+        release,
+        newestEntry?.published,
       ) ?? ''
     );
   }
@@ -467,6 +476,14 @@ function parseVersionsFromXml(xml: string): string[] {
     .filter(Boolean);
 }
 
+function readVersioningTag(
+  xml: string,
+  tag: 'latest' | 'release',
+): string | null {
+  const value = new RegExp(`<${tag}>([^<]*)</${tag}>`).exec(xml)?.[1]?.trim();
+  return value ? value : null;
+}
+
 /**
  * True for a version-level (snapshot) maven-metadata.xml. Maven 3 writes
  * `<snapshotVersions>`; Maven 2 writes only `<snapshot>`.
@@ -476,30 +493,34 @@ function isSnapshotMetadata(xml: string): boolean {
 }
 
 /**
- * Read the build timestamp out of a version-level (snapshot) maven-metadata.xml.
+ * Date a version-level (snapshot) maven-metadata.xml.
  *
  * The document describes one timestamped build — `<snapshotVersions>` lists it
  * once per extension and classifier — so a single VersionMetadata represents
- * the whole file. `<lastUpdated>` (yyyyMMddHHmmss, UTC) is the build's time;
- * `<snapshot><timestamp>` (yyyyMMdd.HHmmss) is the same instant and is used as
- * a fallback.
+ * the whole file. It is dated by the upstream's `Last-Modified` for the
+ * document. The build time written inside it can only make that later, never
+ * earlier, because the deploying client writes it.
  *
- * Returns an empty list when no timestamp can be read, which blocks the
- * metadata rather than serving a build of unknown age.
+ * Returns an empty list without a `Last-Modified`, which blocks the metadata
+ * rather than serving a build of unknown age.
  */
-function snapshotVersions(xml: string, path: string): VersionMetadata[] {
+function snapshotVersions(
+  xml: string,
+  path: string,
+  documentModified: Date | null,
+): VersionMetadata[] {
+  if (!documentModified) return [];
   const { groupId, artifactId } = parseSnapshotPath(path);
   const version = /<version>([^<]+)<\/version>/.exec(xml)?.[1]?.trim() ?? '';
-  const published = parseSnapshotTimestamp(xml);
-  if (!published) return [];
+  const built = parseSnapshotTimestamp(xml);
+  const published =
+    built && built > documentModified ? built : documentModified;
   return [{ packageName: `${groupId}:${artifactId}`, version, published }];
 }
 
 /**
- * Parse the `<lastUpdated>` of an artifact-level maven-metadata.xml.
- *
- * It records when the document was last rewritten, i.e. when its newest version
- * appeared, so it is an upper bound on every listed version's publish time.
+ * Parse the `<lastUpdated>` of an artifact-level maven-metadata.xml, which the
+ * deploying client writes when it rewrites the document.
  */
 function parseMetadataLastUpdated(xml: string): Date | null {
   const raw = /<lastUpdated>(\d{14})<\/lastUpdated>/.exec(xml)?.[1];

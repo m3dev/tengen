@@ -30,10 +30,10 @@ export interface RegistryConfig {
    */
   baseUrl?: string;
   /**
-   * Overrides the registry's URL prefix and display name. Used to mount several
-   * instances of the same proxy class at different paths — e.g. additional Maven
-   * repositories declared with `--maven-repo <name>=<url>`. Registries with a
-   * fixed name ignore this.
+   * Overrides the registry's URL prefix, display name and malicious/allowlist
+   * DB section. Used to mount several instances of the same proxy class at
+   * different paths — e.g. additional Maven repositories declared with
+   * `--maven-repo <name>=<url>`. Registries with a fixed name ignore this.
    */
   name?: string;
   /**

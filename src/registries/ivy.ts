@@ -73,9 +73,8 @@ export interface IvyRegistryConfig extends RegistryConfig {
  * listing's order: in that run Coursier asked for `1.3.4+151-7c324c7c` while the
  * listing ended at `1.3.4+160-681434ff`.
  *
- * Malicious/allowlist lookups use the shared "maven" ecosystem and the module's
- * Maven coordinate, since OSV tracks JVM artifacts there regardless of
- * repository layout.
+ * Malicious/allowlist lookups read the DB section named after this repository
+ * and match the module's Maven coordinate.
  */
 export class IvyRegistryProxy extends RegistryProxy {
   readonly name: string;
@@ -92,10 +91,6 @@ export class IvyRegistryProxy extends RegistryProxy {
    */
   private get endpoint(): ArtifactoryEndpoint | null {
     return (this.config as IvyRegistryConfig).endpoint ?? null;
-  }
-
-  protected override get dbKey(): string {
-    return 'maven';
   }
 
   protected setRouting() {

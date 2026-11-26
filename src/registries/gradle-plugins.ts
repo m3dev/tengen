@@ -7,11 +7,12 @@ import { MavenRegistryProxy } from './maven.ts';
  * artifacts (`{pluginId}.gradle.plugin`) and the real implementation modules
  * alike — so routing, metadata filtering, and download gating are inherited
  * verbatim from MavenRegistryProxy. deps.dev indexes the marker artifacts under
- * the Maven ecosystem, so the age filter resolves publish dates the same way,
- * and malicious/allowlist lookups use the shared "maven" ecosystem.
+ * the Maven ecosystem, so the age filter resolves publish dates the same way.
  *
- * Only `name` differs from plain Maven: it mounts this proxy under a distinct
- * URL prefix (/gradle-plugins).
+ * Two things differ from plain Maven:
+ *   - `name` mounts this proxy under a distinct URL prefix (/gradle-plugins)
+ *   - `dbKey` points the malicious/allowlist lookups at the shared "maven"
+ *     ecosystem, since OSV tracks Gradle plugin artifacts there.
  *
  * The portal answers maven-metadata.xml for backing implementation modules with
  * a 303 to the hosting repo; MavenRegistryProxy follows metadata redirects
@@ -19,4 +20,8 @@ import { MavenRegistryProxy } from './maven.ts';
  */
 export class GradlePluginsRegistryProxy extends MavenRegistryProxy {
   readonly name = 'gradle-plugins';
+
+  protected override get dbKey(): string {
+    return 'maven';
+  }
 }

@@ -266,7 +266,28 @@ describe("IvyRegistryProxy – revision listings", () => {
     expect(listingEntries(res)).toEqual(["1.0.0"]);
   });
 
-  it("omits a revision the malicious DB names", async () => {
+  it("omits a revision the repository's own malicious DB section names", async () => {
+    mockReadFileSync.mockReturnValue(
+      JSON.stringify({
+        "sbt-plugins": {
+          maliciousPackages: [],
+          maliciousVersions: { "ch.epfl.scala:sbt-bloop_2.12_1.0": ["2.0.0"] },
+        },
+      }),
+    );
+    mockFolderInfo(["1.0.0", "2.0.0"]);
+    mockRevisionDates({
+      "1.0.0": "2024-01-01T00:00:00Z",
+      "2.0.0": "2024-01-01T00:00:00Z",
+    });
+
+    const res = makeRes();
+    await withIndex().handleRequest(makeReq(`${MODULE}/`) as any, res as any);
+
+    expect(listingEntries(res)).toEqual(["1.0.0"]);
+  });
+
+  it("does not read the maven section, which describes Central", async () => {
     mockReadFileSync.mockReturnValue(
       JSON.stringify({
         maven: {
@@ -284,7 +305,7 @@ describe("IvyRegistryProxy – revision listings", () => {
     const res = makeRes();
     await withIndex().handleRequest(makeReq(`${MODULE}/`) as any, res as any);
 
-    expect(listingEntries(res)).toEqual(["1.0.0"]);
+    expect(listingEntries(res)).toEqual(["1.0.0", "2.0.0"]);
   });
 
   it("refuses rather than serve an unfiltered listing when the API cannot be read", async () => {
