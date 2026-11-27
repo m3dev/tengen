@@ -184,6 +184,27 @@ describe("loadConfig", () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
+  it("disables the Last-Modified fallback by default", () => {
+    expect(loadConfig([]).mavenLastModifiedFallback).toBe(false);
+  });
+
+  it("parses --maven-last-modified-fallback", () => {
+    const config = loadConfig(["--maven-last-modified-fallback"]);
+    expect(config.mavenLastModifiedFallback).toBe(true);
+  });
+
+  it("lists --maven-last-modified-fallback in the help", () => {
+    const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit called");
+    });
+
+    expect(() => loadConfig(["--help"])).toThrow("process.exit called");
+    expect(String(consoleSpy.mock.calls[0]?.[0])).toContain(
+      "--maven-last-modified-fallback",
+    );
+  });
+
   it("prints help and calls process.exit(0) when --help is passed", () => {
     const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
     const exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {

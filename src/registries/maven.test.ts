@@ -148,13 +148,12 @@ describe("MavenRegistryProxy – download routing", () => {
     expect(res.status).toHaveBeenCalledWith(404);
   });
 
-  it("blocks JARs when neither deps.dev nor the upstream has a date", async () => {
+  it("blocks JARs when deps.dev has no date", async () => {
     vi.mocked(axios.get).mockResolvedValueOnce({
       status: 404,
       data: {},
       headers: {},
     });
-    vi.mocked(axios.head).mockResolvedValueOnce({ status: 404, headers: {} });
     const res = makeRes();
     await proxy.handleRequest(
       makeReq("/com/example/mylib/1.0.0/mylib-1.0.0.jar"),
@@ -391,6 +390,12 @@ describe("MavenRegistryProxy – deps.dev with Last-Modified fallback", () => {
   beforeEach(() => {
     __resetCachesForTesting();
     mockReadFileSync.mockReturnValue(JSON.stringify({}));
+    proxy = new MavenRegistryProxy({
+      upstream: "https://repo1.maven.org/maven2",
+      delayMs: DELAY_MS,
+      maliciousDbPath: "/dev/null",
+      lastModifiedFallback: true,
+    });
   });
 
   /**
@@ -457,6 +462,75 @@ describe("MavenRegistryProxy – deps.dev with Last-Modified fallback", () => {
     );
     return String(vi.mocked(res.send).mock.calls[0]?.[0]);
   }
+
+  describe("when disabled", () => {
+    beforeEach(() => {
+      proxy = new MavenRegistryProxy({
+        upstream: "https://repo1.maven.org/maven2",
+        delayMs: DELAY_MS,
+        maliciousDbPath: "/dev/null",
+        lastModifiedFallback: false,
+      });
+    });
+
+    it("blocks a download deps.dev has no date for, without probing", async () => {
+      mockRepos({
+        depsDev: depsDevMissing,
+        pomDates: { "1.0.0": BEFORE_CUTOFF },
+      });
+      const res = await download("1.0.0");
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(vi.mocked(axios.head)).not.toHaveBeenCalled();
+    });
+
+    it("drops listed versions deps.dev has no date for, without probing", async () => {
+      const xml = makeXml(["1.0.0", "1.1.0"]);
+      mockRepos({
+        depsDev: depsDevPackage([
+          {
+            versionKey: { version: "1.0.0" },
+            publishedAt: new Date(BEFORE_CUTOFF).toISOString(),
+          },
+        ]),
+        xml,
+        pomDates: { "1.1.0": BEFORE_CUTOFF },
+      });
+      const out = await metadata();
+      expect(out).toContain("<version>1.0.0</version>");
+      expect(out).not.toContain("<version>1.1.0</version>");
+      expect(vi.mocked(axios.head)).not.toHaveBeenCalled();
+    });
+
+    it("returns 404 when deps.dev does not know the package", async () => {
+      mockRepos({
+        depsDev: depsDevMissing,
+        xml: makeXml(["1.0.0"]),
+        pomDates: { "1.0.0": BEFORE_CUTOFF },
+      });
+      const res = makeRes();
+      await proxy.handleRequest(
+        makeReq("/com/example/mylib/maven-metadata.xml"),
+        res,
+      );
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(vi.mocked(axios.head)).not.toHaveBeenCalled();
+    });
+
+    it("is the default when the option is omitted", async () => {
+      proxy = new MavenRegistryProxy({
+        upstream: "https://repo1.maven.org/maven2",
+        delayMs: DELAY_MS,
+        maliciousDbPath: "/dev/null",
+      });
+      mockRepos({
+        depsDev: depsDevMissing,
+        pomDates: { "1.0.0": BEFORE_CUTOFF },
+      });
+      const res = await download("1.0.0");
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(vi.mocked(axios.head)).not.toHaveBeenCalled();
+    });
+  });
 
   describe("downloads", () => {
     it("dates the version by its POM when deps.dev has no record", async () => {
