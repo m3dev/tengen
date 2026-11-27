@@ -677,9 +677,12 @@ describe("MavenRegistryProxy – sbt plugins whose files omit the cross-version 
     );
   });
 
-  it("handles the Scala 3 and sbt 2 suffix", async () => {
+  it("handles the sbt 0.13 suffix", async () => {
     mockUpstream({ "sbt-demo-plugin-3.0.0.pom": BEFORE_CUTOFF });
-    const res = await download("sbt-demo-plugin_3_2", "sbt-demo-plugin-3.0.0.jar");
+    const res = await download(
+      "sbt-demo-plugin_2.10_0.13",
+      "sbt-demo-plugin-3.0.0.jar",
+    );
     expect(res.redirect).toHaveBeenCalled();
   });
 

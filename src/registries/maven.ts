@@ -37,7 +37,7 @@ const PROBE_CACHE_MAX = 10_000;
 /** POM probes keyed by URL and shared across registry instances. */
 const pomProbe = new LastModifiedProbe(PROBE_TTL_MS, PROBE_CACHE_MAX);
 
-/** The `_<scala>_<sbt>` suffix of an sbt plugin's artifactId, such as `_2.12_1.0` or `_3_2`. */
+/** The `_<scala>_<sbt>` suffix of an sbt plugin's artifactId, such as `_2.12_1.0` or `_2.10_0.13`. */
 const SBT_PLUGIN_SUFFIX = /_\d+(?:\.\d+)*_\d+(?:\.\d+)*$/;
 
 /** @internal Reset the probe cache. Used by tests; not part of the public API. */
