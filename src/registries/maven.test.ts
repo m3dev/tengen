@@ -725,6 +725,28 @@ describe("MavenRegistryProxy – sbt plugins whose files omit the cross-version 
     expect(probed()).toEqual([POM("mylib", "mylib")]);
   });
 
+  it("dates a plugin with the newer suffix by the POM named after the directory", async () => {
+    mockUpstream({ "sbt-demo-plugin_sbt2_3-3.0.0.pom": BEFORE_CUTOFF });
+    const res = await download(
+      "sbt-demo-plugin_sbt2_3",
+      "sbt-demo-plugin_sbt2_3-3.0.0.jar",
+    );
+    expect(res.redirect).toHaveBeenCalled();
+    expect(probed()).toEqual([
+      POM("sbt-demo-plugin_sbt2_3", "sbt-demo-plugin_sbt2_3"),
+    ]);
+  });
+
+  it.each(["sbt-demo-plugin_sbt2_3", "sbt-demo-plugin_sbt1_2.12"])(
+    "tries no other name for %s, whose files keep the suffix",
+    async (dir) => {
+      mockUpstream({});
+      const res = await download(dir, `${dir}-3.0.0.jar`);
+      expect(res.status).toHaveBeenCalledWith(404);
+      expect(probed()).toEqual([POM(dir, dir)]);
+    },
+  );
+
   it("lists a version dated by the POM without the suffix", async () => {
     mockUpstream(
       { "sbt-demo-plugin-3.0.0.pom": BEFORE_CUTOFF },
