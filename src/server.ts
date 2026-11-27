@@ -21,6 +21,7 @@ export function createServer(config: Config): express.Express {
   const allowlistDbPath = config.allowlistDbPath;
   const upstreamAccess = config.upstreamAccess;
   const baseUrl = config.baseUrl;
+  const lastModifiedFallback = config.mavenLastModifiedFallback;
   const registries = [
     new NpmRegistryProxy({
       upstream: config.upstreams.npm,
@@ -69,6 +70,7 @@ export function createServer(config: Config): express.Express {
       allowlistDbPath,
       upstreamAccess,
       baseUrl,
+      lastModifiedFallback,
     }),
     new GradlePluginsRegistryProxy({
       upstream: config.upstreams.gradlePlugins,
@@ -77,6 +79,7 @@ export function createServer(config: Config): express.Express {
       allowlistDbPath,
       upstreamAccess,
       baseUrl,
+      lastModifiedFallback,
     }),
   ];
 
@@ -138,6 +141,9 @@ export async function startServer(
     }
     console.log(`  delay:      ${config.delayDays} day(s)`);
     console.log(`  upstream-access: ${config.upstreamAccess}`);
+    console.log(
+      `  maven-last-modified-fallback: ${config.mavenLastModifiedFallback ? 'on' : 'off'}`,
+    );
     if (config.baseUrl) {
       console.log(`  base-url:   ${config.baseUrl}`);
     }
