@@ -615,3 +615,124 @@ describe("MavenRegistryProxy – deps.dev with Last-Modified fallback", () => {
     });
   });
 });
+
+describe("MavenRegistryProxy – sbt plugins whose files omit the cross-version suffix", () => {
+  const depsDevMissing = { status: 404, data: {}, headers: {} };
+  const POM = (dir: string, name: string) =>
+    `https://repo1.maven.org/maven2/org/example/${dir}/3.0.0/${name}-3.0.0.pom`;
+
+  beforeEach(() => {
+    __resetCachesForTesting();
+    mockReadFileSync.mockReturnValue(JSON.stringify({}));
+  });
+
+  /**
+   * deps.dev knows nothing, and the upstream has only the POMs in `poms`
+   * (file name → Last-Modified). Any other file is a 404.
+   */
+  function mockUpstream(poms: Record<string, number>, xml?: string) {
+    vi.mocked(axios.get).mockImplementation(((url: string) =>
+      Promise.resolve(
+        url.startsWith("https://api.deps.dev/")
+          ? depsDevMissing
+          : { status: 200, data: xml, headers: {} },
+      )) as any);
+    vi.mocked(axios.head).mockImplementation(((url: string) => {
+      const name = url.slice(url.lastIndexOf("/") + 1);
+      return Promise.resolve(
+        name in poms
+          ? {
+              status: 200,
+              headers: { "last-modified": new Date(poms[name]!).toUTCString() },
+            }
+          : { status: 404, headers: {} },
+      );
+    }) as any);
+  }
+
+  const probed = () => vi.mocked(axios.head).mock.calls.map((c) => c[0]);
+
+  async function download(dir: string, file: string) {
+    const res = makeRes();
+    await proxy.handleRequest(
+      makeReq(`/org/example/${dir}/3.0.0/${file}`),
+      res,
+    );
+    return res;
+  }
+
+  it("dates the plugin by the POM without the suffix when the suffixed one is missing", async () => {
+    mockUpstream({ "sbt-demo-plugin-3.0.0.pom": BEFORE_CUTOFF });
+    const res = await download(
+      "sbt-demo-plugin_2.12_1.0",
+      "sbt-demo-plugin-3.0.0.jar",
+    );
+    expect(probed()).toEqual([
+      POM("sbt-demo-plugin_2.12_1.0", "sbt-demo-plugin_2.12_1.0"),
+      POM("sbt-demo-plugin_2.12_1.0", "sbt-demo-plugin"),
+    ]);
+    expect(res.redirect).toHaveBeenCalledWith(
+      307,
+      "https://repo1.maven.org/maven2/org/example/sbt-demo-plugin_2.12_1.0/3.0.0/sbt-demo-plugin-3.0.0.jar",
+    );
+  });
+
+  it("handles the Scala 3 and sbt 2 suffix", async () => {
+    mockUpstream({ "sbt-demo-plugin-3.0.0.pom": BEFORE_CUTOFF });
+    const res = await download("sbt-demo-plugin_3_2", "sbt-demo-plugin-3.0.0.jar");
+    expect(res.redirect).toHaveBeenCalled();
+  });
+
+  it("keeps the POM named after the directory when it exists", async () => {
+    mockUpstream({
+      "sbt-demo-plugin_2.12_1.0-3.0.0.pom": BEFORE_CUTOFF,
+      "sbt-demo-plugin-3.0.0.pom": AFTER_CUTOFF,
+    });
+    const res = await download(
+      "sbt-demo-plugin_2.12_1.0",
+      "sbt-demo-plugin_2.12_1.0-3.0.0.jar",
+    );
+    expect(res.redirect).toHaveBeenCalled();
+    expect(probed()).toHaveLength(1);
+  });
+
+  it("blocks the plugin when the POM without the suffix is inside the cooldown", async () => {
+    mockUpstream({ "sbt-demo-plugin-3.0.0.pom": AFTER_CUTOFF });
+    const res = await download(
+      "sbt-demo-plugin_2.12_1.0",
+      "sbt-demo-plugin-3.0.0.jar",
+    );
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  it("blocks the plugin when neither POM exists", async () => {
+    mockUpstream({});
+    const res = await download(
+      "sbt-demo-plugin_2.12_1.0",
+      "sbt-demo-plugin-3.0.0.jar",
+    );
+    expect(res.status).toHaveBeenCalledWith(404);
+  });
+
+  it("tries no other name for an artifact without a suffix", async () => {
+    mockUpstream({});
+    const res = await download("mylib", "mylib-3.0.0.jar");
+    expect(res.status).toHaveBeenCalledWith(404);
+    expect(probed()).toEqual([POM("mylib", "mylib")]);
+  });
+
+  it("lists a version dated by the POM without the suffix", async () => {
+    mockUpstream(
+      { "sbt-demo-plugin-3.0.0.pom": BEFORE_CUTOFF },
+      makeXml(["3.0.0"]),
+    );
+    const res = makeRes();
+    await proxy.handleRequest(
+      makeReq("/org/example/sbt-demo-plugin_2.12_1.0/maven-metadata.xml"),
+      res,
+    );
+    expect(String(vi.mocked(res.send).mock.calls[0]?.[0])).toContain(
+      "<version>3.0.0</version>",
+    );
+  });
+});

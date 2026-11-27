@@ -37,6 +37,9 @@ const PROBE_CACHE_MAX = 10_000;
 /** POM probes keyed by URL and shared across registry instances. */
 const pomProbe = new LastModifiedProbe(PROBE_TTL_MS, PROBE_CACHE_MAX);
 
+/** The `_<scala>_<sbt>` suffix of an sbt plugin's artifactId, such as `_2.12_1.0` or `_3_2`. */
+const SBT_PLUGIN_SUFFIX = /_\d+(?:\.\d+)*_\d+(?:\.\d+)*$/;
+
 /** @internal Reset the probe cache. Used by tests; not part of the public API. */
 export function __resetProbeCacheForTesting() {
   pomProbe.clear();
@@ -172,7 +175,9 @@ export class MavenRegistryProxy extends RegistryProxy {
 
   /**
    * Read a version's publish time from the upstream's `Last-Modified` header.
-   * The POM is the probe target: it is the file every release has.
+   * The POM is the probe target: it is the file every release has. An sbt
+   * plugin's directory ends in `_<scala>_<sbt>`, which its files may omit, so
+   * the POM is also tried without it.
    */
   private async fetchPublishedViaLastModified(
     groupId: string,
@@ -181,8 +186,15 @@ export class MavenRegistryProxy extends RegistryProxy {
   ): Promise<Date | null> {
     const base = this.config.upstream.replace(/\/$/, '');
     const groupPath = groupId.split('.').join('/');
-    const url = `${base}/${groupPath}/${artifactId}/${version}/${artifactId}-${version}.pom`;
-    return pomProbe.get(url, url);
+    const pomUrl = (name: string) =>
+      `${base}/${groupPath}/${artifactId}/${version}/${name}-${version}.pom`;
+
+    const url = pomUrl(artifactId);
+    const published = await pomProbe.get(url, url);
+    if (published || !SBT_PLUGIN_SUFFIX.test(artifactId)) return published;
+
+    const bareUrl = pomUrl(artifactId.replace(SBT_PLUGIN_SUFFIX, ''));
+    return pomProbe.get(bareUrl, bareUrl);
   }
 
   private filterXml(
