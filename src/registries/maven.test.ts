@@ -715,6 +715,12 @@ describe("MavenRegistryProxy – sbt plugins whose files omit the cross-version 
   beforeEach(() => {
     __resetCachesForTesting();
     mockReadFileSync.mockReturnValue(JSON.stringify({}));
+    proxy = new MavenRegistryProxy({
+      upstream: "https://repo1.maven.org/maven2",
+      delayMs: DELAY_MS,
+      maliciousDbPath: "/dev/null",
+      lastModifiedFallback: true,
+    });
   });
 
   /**
