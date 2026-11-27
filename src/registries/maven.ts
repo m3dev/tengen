@@ -330,7 +330,8 @@ function parseMavenPath(path: string): {
 /**
  * Filter a maven-metadata.xml string to only include allowed versions.
  *
- * Updates <versions>, <release>, <latest>, and <lastUpdated> fields.
+ * Updates <versions>, the top-level <version>, <release>, <latest>, and
+ * <lastUpdated> fields.
  * Returns null when no versions remain after filtering.
  */
 function filterMavenMetadataXml(
@@ -361,8 +362,11 @@ function filterMavenMetadataXml(
 
   if (!hasAllowedVersions) return null;
 
-  // Update <release>, <latest>, and <lastUpdated> to reflect the filtered state
+  // Update the top-level <version>, <release>, <latest>, and <lastUpdated> to reflect the filtered state
   let result = filtered
+    .replace(/^[\s\S]*?<versioning>/, (head) =>
+      head.replace(/<version>[^<]*<\/version>/, `<version>${latestVersion}</version>`),
+    )
     .replace(/<release>[^<]*<\/release>/, `<release>${latestVersion}</release>`)
     .replace(/<latest>[^<]*<\/latest>/, `<latest>${latestVersion}</latest>`);
   if (lastUpdated) {
