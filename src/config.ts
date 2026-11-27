@@ -38,6 +38,12 @@ export interface Config {
    * mode (the loader errors without it); unused in `direct` mode.
    */
   baseUrl?: string;
+  /**
+   * Date Maven and Gradle Plugin Portal versions that deps.dev has no date for
+   * by the `Last-Modified` header of their POM on the upstream. When unset, such
+   * versions stay blocked.
+   */
+  mavenLastModifiedFallback?: boolean;
 }
 
 const OPTIONS = {
@@ -115,6 +121,11 @@ const OPTIONS = {
     default: "",
     description:
       "Absolute base URL of this proxy (e.g. https://tengen.example.com); used to rewrite artifact URLs like npm dist.tarball so clients fetch through the proxy. Required when using --upstream-access proxied",
+  },
+  "maven-last-modified-fallback": {
+    type: "boolean" as const,
+    description:
+      "Date Maven/Gradle Plugin Portal versions that deps.dev has no date for by the Last-Modified header of their POM (default: off, such versions stay blocked)",
   },
   help: {
     type: "boolean" as const,
@@ -200,5 +211,6 @@ export function loadConfig(argv = process.argv.slice(2)): Config {
     allowlistDbPath: (values["allowlist-db-path"] as string) || undefined,
     upstreamAccess,
     baseUrl,
+    mavenLastModifiedFallback: values["maven-last-modified-fallback"] === true,
   };
 }

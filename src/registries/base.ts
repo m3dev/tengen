@@ -3,7 +3,7 @@ import type { Request, Response } from 'express';
 import { readFileSync } from 'node:fs';
 import type { AllowlistDb, MaliciousDb } from '../types.ts';
 
-interface RegistryConfig {
+export interface RegistryConfig {
   /** Upstream registry base URL */
   upstream: string;
   /** Filter out versions published within this many milliseconds */

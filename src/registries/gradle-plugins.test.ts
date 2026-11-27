@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { GradlePluginsRegistryProxy } from "./gradle-plugins.ts";
+import { __resetProbeCacheForTesting } from "./maven.ts";
+import { __resetCachesForTesting } from "./base.ts";
 import { makeReq, makeRes } from "./test-helpers.ts";
 
 vi.mock("axios", () => ({
-  default: { get: vi.fn() },
+  default: { get: vi.fn(), head: vi.fn() },
 }));
 vi.mock("node:fs", () => ({
   readFileSync: vi.fn(),
@@ -30,6 +32,8 @@ let proxy: GradlePluginsRegistryProxy;
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.spyOn(console, "log").mockImplementation(() => {});
+  __resetProbeCacheForTesting();
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
   proxy = new GradlePluginsRegistryProxy({
@@ -277,5 +281,55 @@ describe("GradlePluginsRegistryProxy – malicious filtering shares the maven DB
     const body = vi.mocked(res.send).mock.calls[0][0] as string;
     expect(body).not.toContain("<version>1.0.0</version>");
     expect(body).toContain("<version>2.0.0</version>");
+  });
+});
+
+describe("GradlePluginsRegistryProxy – Last-Modified fallback", () => {
+  const PATH = "/org/example/my-plugin/maven-metadata.xml";
+  const POM_1_0_0 =
+    "https://plugins.gradle.org/m2/org/example/my-plugin/1.0.0/my-plugin-1.0.0.pom";
+
+  beforeEach(() => {
+    __resetCachesForTesting();
+    mockReadFileSync.mockReturnValue(JSON.stringify({}));
+  });
+
+  // deps.dev does not know the plugin; the portal serves its POM with a
+  // Last-Modified before the cutoff.
+  function mockUnknownToDepsDev() {
+    vi.mocked(axios.get)
+      .mockResolvedValueOnce({
+        status: 200,
+        data: makeXml(["1.0.0"]),
+        headers: {},
+      })
+      .mockResolvedValueOnce({ status: 404, data: {}, headers: {} });
+    vi.mocked(axios.head).mockResolvedValue({
+      status: 200,
+      headers: { "last-modified": new Date(BEFORE_CUTOFF).toUTCString() },
+    });
+  }
+
+  it("dates versions deps.dev lacks by their POM when enabled", async () => {
+    proxy = new GradlePluginsRegistryProxy({
+      upstream: "https://plugins.gradle.org/m2",
+      delayMs: DELAY_MS,
+      maliciousDbPath: "/dev/null",
+      lastModifiedFallback: true,
+    });
+    mockUnknownToDepsDev();
+    const res = makeRes();
+    await proxy.handleRequest(makeReq(PATH), res);
+    expect(vi.mocked(axios.head).mock.calls[0]?.[0]).toBe(POM_1_0_0);
+    const body = vi.mocked(res.send).mock.calls[0][0] as string;
+    expect(body).toContain("<version>1.0.0</version>");
+  });
+
+  it("keeps such versions blocked by default", async () => {
+    mockUnknownToDepsDev();
+    const res = makeRes();
+    await proxy.handleRequest(makeReq(PATH), res);
+    expect(vi.mocked(axios.head)).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(404);
   });
 });

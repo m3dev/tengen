@@ -1,7 +1,11 @@
 import type { Request, Response } from 'express';
 import axios from 'axios';
 import { createHash } from 'node:crypto';
-import { RegistryProxy, type VersionMetadata } from './base.ts';
+import {
+  RegistryProxy,
+  type RegistryConfig,
+  type VersionMetadata,
+} from './base.ts';
 import { LastModifiedProbe, parseHttpDate } from './last-modified.ts';
 
 interface DepsDevVersionEntry {
@@ -42,8 +46,22 @@ export function __resetProbeCacheForTesting() {
   pomProbe.clear();
 }
 
+interface MavenRegistryConfig extends RegistryConfig {
+  /**
+   * Date a version deps.dev has no date for by the `Last-Modified` header of its
+   * POM on the upstream. When unset, such a version stays blocked.
+   */
+  lastModifiedFallback?: boolean;
+}
+
 export class MavenRegistryProxy extends RegistryProxy {
   readonly name: string = 'maven';
+  private readonly lastModifiedFallback: boolean;
+
+  constructor(config: MavenRegistryConfig) {
+    super(config);
+    this.lastModifiedFallback = config.lastModifiedFallback ?? false;
+  }
 
   /**
    * Routes requests:
@@ -90,6 +108,8 @@ export class MavenRegistryProxy extends RegistryProxy {
       };
     }
 
+    if (!this.lastModifiedFallback) return null;
+
     // Files of one version can carry different mtimes, so every file is dated
     // by the same probe the metadata filter uses for its version.
     const probed = await this.fetchPublishedViaLastModified(
@@ -132,6 +152,8 @@ export class MavenRegistryProxy extends RegistryProxy {
         }
       }
     }
+
+    if (!this.lastModifiedFallback) return dated;
 
     // deps.dev lags behind Central and does not know artifacts hosted
     // elsewhere. Those versions are dated by the upstream's Last-Modified; one
