@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import axios from "axios";
 import { LastModifiedProbe } from "./last-modified.ts";
 
@@ -10,6 +10,7 @@ const OLD = new Date("2024-01-01T00:00:00Z");
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.spyOn(console, "log").mockImplementation(() => {});
 });
 
 describe("LastModifiedProbe", () => {
@@ -68,5 +69,63 @@ describe("LastModifiedProbe", () => {
     expect(vi.mocked(axios.head).mock.calls[0]?.[1]).toMatchObject({
       timeout: expect.any(Number),
     });
+  });
+});
+
+describe("LastModifiedProbe logging", () => {
+  const URL = "https://a.example.com/x";
+  let log: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    log = vi.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    log.mockRestore();
+  });
+
+  it("logs the date it read", async () => {
+    vi.mocked(axios.head).mockResolvedValue({
+      status: 200,
+      headers: { "last-modified": OLD.toUTCString() },
+    } as any);
+    await new LastModifiedProbe(60_000, 10).get("k", URL);
+
+    expect(log).toHaveBeenCalledWith(
+      `[last-modified] ${URL} -> 200 ${OLD.toISOString()}`,
+    );
+  });
+
+  it("logs an answer without a date", async () => {
+    vi.mocked(axios.head).mockResolvedValue({ status: 200, headers: {} } as any);
+    await new LastModifiedProbe(60_000, 10).get("k", URL);
+
+    expect(log).toHaveBeenCalledWith(`[last-modified] ${URL} -> 200 no date`);
+  });
+
+  it("logs a missing file", async () => {
+    vi.mocked(axios.head).mockResolvedValue({ status: 404, headers: {} } as any);
+    await new LastModifiedProbe(60_000, 10).get("k", URL);
+
+    expect(log).toHaveBeenCalledWith(`[last-modified] ${URL} -> 404 no date`);
+  });
+
+  it("logs a failed request", async () => {
+    vi.mocked(axios.head).mockRejectedValue(new Error("ECONNRESET"));
+    await new LastModifiedProbe(60_000, 10).get("k", URL);
+
+    expect(log).toHaveBeenCalledWith(`[last-modified] ${URL} -> error no date`);
+  });
+
+  it("logs a probe once while its answer is cached", async () => {
+    vi.mocked(axios.head).mockResolvedValue({
+      status: 200,
+      headers: { "last-modified": OLD.toUTCString() },
+    } as any);
+    const probe = new LastModifiedProbe(60_000, 10);
+    await Promise.all([probe.get("k", URL), probe.get("k", URL)]);
+    await probe.get("k", URL);
+
+    expect(log).toHaveBeenCalledTimes(1);
   });
 });

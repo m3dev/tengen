@@ -13,7 +13,8 @@ const TIMEOUT_MS = 10_000;
  * A probe never throws: a timestamp that cannot be read is null, and the caller
  * treats the version as unknown. Only a definitive answer (200 or 404/410) is
  * cached, so a 429, a 5xx or a network error blocks the version for the current
- * request alone. Concurrent probes of the same key share one request.
+ * request alone. Concurrent probes of the same key share one request. Each
+ * request is logged with the status and the date it returned.
  */
 export class LastModifiedProbe {
   private readonly cache: TtlCache<Date | null>;
@@ -30,7 +31,10 @@ export class LastModifiedProbe {
     if (inFlight) return inFlight;
 
     const probe = headLastModified(url)
-      .then(({ published, definitive }) => {
+      .then(({ published, definitive, status }) => {
+        console.log(
+          `[last-modified] ${url} -> ${status} ${published?.toISOString() ?? 'no date'}`,
+        );
         if (definitive) this.cache.set(key, published);
         return published;
       })
@@ -52,9 +56,11 @@ export class LastModifiedProbe {
  * (repo.scala-sbt.org 302s to Central or to Artifactory), and that file's
  * timestamp is the one that matters.
  */
-async function headLastModified(
-  url: string,
-): Promise<{ published: Date | null; definitive: boolean }> {
+async function headLastModified(url: string): Promise<{
+  published: Date | null;
+  definitive: boolean;
+  status: number | 'error';
+}> {
   let res;
   try {
     res = await axios.head(url, {
@@ -63,15 +69,17 @@ async function headLastModified(
       timeout: TIMEOUT_MS,
     });
   } catch {
-    return { published: null, definitive: false };
+    return { published: null, definitive: false, status: 'error' };
   }
-  if (res.status === 404 || res.status === 410) {
-    return { published: null, definitive: true };
+  const { status } = res;
+  if (status === 404 || status === 410) {
+    return { published: null, definitive: true, status };
   }
-  if (res.status !== 200) return { published: null, definitive: false };
+  if (status !== 200) return { published: null, definitive: false, status };
   return {
     published: parseHttpDate(res.headers['last-modified']),
     definitive: true,
+    status,
   };
 }
 

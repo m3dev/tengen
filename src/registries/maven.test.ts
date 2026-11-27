@@ -30,6 +30,7 @@ let proxy: MavenRegistryProxy;
 
 beforeEach(() => {
   vi.resetAllMocks();
+  vi.spyOn(console, "log").mockImplementation(() => {});
   __resetProbeCacheForTesting();
   vi.useFakeTimers();
   vi.setSystemTime(NOW);
