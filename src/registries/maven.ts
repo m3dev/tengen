@@ -2,6 +2,7 @@ import type { Request, Response } from 'express';
 import axios from 'axios';
 import { createHash } from 'node:crypto';
 import { RegistryProxy, type VersionMetadata } from './base.ts';
+import { LastModifiedProbe, parseHttpDate } from './last-modified.ts';
 
 interface DepsDevVersionEntry {
   versionKey: { system: string; name: string; version: string };
@@ -15,6 +16,30 @@ interface DepsDevPackageResponse {
 interface DepsDevVersionResponse {
   versionKey: { system: string; name: string; version: string };
   publishedAt: string;
+}
+
+/** How many `Last-Modified` probes run at once. */
+const PROBE_CONCURRENCY = 8;
+
+/**
+ * How long a probed timestamp is reused.
+ *
+ * Without a cache every metadata request re-probes every version deps.dev has no
+ * date for. The window is short because a repository can rewrite an artifact's
+ * mtime on re-sync, and a stale value would keep serving a version whose
+ * timestamp has since moved forward into the cooldown window.
+ */
+const PROBE_TTL_MS = 10 * 60 * 1000;
+
+/** How many probed timestamps are kept before the oldest are dropped. */
+const PROBE_CACHE_MAX = 10_000;
+
+/** POM probes keyed by URL and shared across registry instances. */
+const pomProbe = new LastModifiedProbe(PROBE_TTL_MS, PROBE_CACHE_MAX);
+
+/** @internal Reset the probe cache. Used by tests; not part of the public API. */
+export function __resetProbeCacheForTesting() {
+  pomProbe.clear();
 }
 
 export class MavenRegistryProxy extends RegistryProxy {
@@ -56,12 +81,24 @@ export class MavenRegistryProxy extends RegistryProxy {
       `https://api.deps.dev/v3alpha/systems/maven/packages/${packageName}/versions/${encodeURIComponent(version)}`,
       { validateStatus: () => true, maxRedirects: 0 },
     );
-    if (res.status !== 200 || !res.data?.publishedAt) return null;
-    return {
-      packageName,
-      version: res.data.versionKey.version,
-      published: new Date(res.data.publishedAt),
-    };
+    const published = parseDepsDevDate(res.data?.publishedAt);
+    if (res.status === 200 && published) {
+      return {
+        packageName,
+        version: res.data.versionKey.version,
+        published,
+      };
+    }
+
+    // Files of one version can carry different mtimes, so every file is dated
+    // by the same probe the metadata filter uses for its version.
+    const probed = await this.fetchPublishedViaLastModified(
+      groupId,
+      artifactId,
+      version,
+    );
+    if (!probed) return null;
+    return { packageName, version, published: probed };
   }
 
   protected async fetchUpstreamXml(req: Request) {
@@ -86,12 +123,66 @@ export class MavenRegistryProxy extends RegistryProxy {
       `https://api.deps.dev/v3alpha/systems/maven/packages/${packageName}`,
       { validateStatus: () => true, maxRedirects: 0 },
     );
-    if (res.status !== 200 || !res.data?.versions) return [];
-    return res.data.versions.map((v) => ({
-      packageName,
-      version: v.versionKey.version,
-      published: new Date(v.publishedAt),
-    }));
+    const dated: VersionMetadata[] = [];
+    if (res.status === 200) {
+      for (const v of res.data?.versions ?? []) {
+        const published = parseDepsDevDate(v.publishedAt);
+        if (published) {
+          dated.push({ packageName, version: v.versionKey.version, published });
+        }
+      }
+    }
+
+    // deps.dev lags behind Central and does not know artifacts hosted
+    // elsewhere. Those versions are dated by the upstream's Last-Modified; one
+    // it cannot date either is left out, and so stays blocked.
+    const known = new Set(dated.map((v) => v.version));
+    const undated = parseVersionsFromXml(metadata).filter((v) => !known.has(v));
+    const probed = await this.probeAll(groupId, artifactId, undated);
+    for (const [version, published] of probed) {
+      if (published) dated.push({ packageName, version, published });
+    }
+    return dated;
+  }
+
+  /** Probe every version's timestamp, bounded to PROBE_CONCURRENCY at a time. */
+  private async probeAll(
+    groupId: string,
+    artifactId: string,
+    versions: string[],
+  ): Promise<[string, Date | null][]> {
+    const out: [string, Date | null][] = new Array(versions.length);
+    let next = 0;
+    const worker = async () => {
+      for (;;) {
+        const i = next++;
+        if (i >= versions.length) return;
+        const version = versions[i]!;
+        out[i] = [
+          version,
+          await this.fetchPublishedViaLastModified(groupId, artifactId, version),
+        ];
+      }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(PROBE_CONCURRENCY, versions.length) }, worker),
+    );
+    return out;
+  }
+
+  /**
+   * Read a version's publish time from the upstream's `Last-Modified` header.
+   * The POM is the probe target: it is the file every release has.
+   */
+  private async fetchPublishedViaLastModified(
+    groupId: string,
+    artifactId: string,
+    version: string,
+  ): Promise<Date | null> {
+    const base = this.config.upstream.replace(/\/$/, '');
+    const groupPath = groupId.split('.').join('/');
+    const url = `${base}/${groupPath}/${artifactId}/${version}/${artifactId}-${version}.pom`;
+    return pomProbe.get(url, url);
   }
 
   private filterXml(
@@ -99,8 +190,21 @@ export class MavenRegistryProxy extends RegistryProxy {
     allowedVersions: VersionMetadata[],
   ): string {
     if (!metadata.includes('<versions>')) return metadata;
+    // Ties on `published` are common with Last-Modified, since a repository
+    // that re-syncs stamps every file alike. The later entry in the document
+    // wins a tie.
+    const order = new Map(
+      parseVersionsFromXml(metadata).map((v, i) => [v, i] as const),
+    );
     const latestEntry = allowedVersions.reduce<VersionMetadata | null>(
-      (acc, v) => (!acc || v.published > acc.published ? v : acc),
+      (acc, v) => {
+        if (!acc) return v;
+        if (v.published > acc.published) return v;
+        if (v.published < acc.published) return acc;
+        return (order.get(v.version) ?? -1) > (order.get(acc.version) ?? -1)
+          ? v
+          : acc;
+      },
       null,
     );
     const allowed = new Set(allowedVersions.map((v) => v.version));
@@ -135,6 +239,23 @@ export class MavenRegistryProxy extends RegistryProxy {
       res.status(200).type('application/xml').send(filteredMetadata);
     }
   }
+}
+
+/**
+ * Extract version strings from the `<versions>` block of a maven-metadata.xml,
+ * in document order. That is not necessarily publication order.
+ */
+function parseVersionsFromXml(xml: string): string[] {
+  const block = /<versions>([\s\S]*?)<\/versions>/.exec(xml);
+  if (!block) return [];
+  return [...block[1]!.matchAll(/<version>([^<]*)<\/version>/g)]
+    .map((m) => m[1]!.trim())
+    .filter(Boolean);
+}
+
+/** deps.dev's `publishedAt`, or null when it is absent or unreadable. */
+function parseDepsDevDate(value: unknown): Date | null {
+  return parseHttpDate(value);
 }
 
 function isMavenMetadataPath(path: string): boolean {

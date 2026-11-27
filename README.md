@@ -280,6 +280,10 @@ Available examples: `bundler`, `composer`, `go`, `gradle`, `maven`, `npm`, `pip`
 
 > **Note:** `maven-metadata.xml` does not include publication timestamps, so version timestamps are fetched from the [deps.dev API](https://api.deps.dev/) (`api.deps.dev`). This external call is made regardless of the `--maven-upstream` setting.
 
+**Fallback to `Last-Modified`.** deps.dev lags behind Central and knows nothing of artifacts hosted elsewhere, such as plugins that `/gradle-plugins` resolves from outside Central. A version deps.dev has no date for — no record, an answer without `publishedAt`, or an error — is dated by the `Last-Modified` header of its POM on the upstream (redirects are followed). A date from deps.dev is never overridden by `Last-Modified`, and a version with neither stays blocked. Versions deps.dev dates cost no extra request; the others are probed in parallel and through a short-lived cache.
+
+`Last-Modified` is the file's mtime on the upstream, not a publication date. A repository that re-syncs can rewrite it, so don't read it as provenance. When several versions share one timestamp, the later entry in `maven-metadata.xml` becomes `<latest>` and `<release>`.
+
 ### Gradle Plugin Portal
 
-Served under `/gradle-plugins`. The portal uses the same Maven m2 layout, so the path patterns and gating behaviour are identical to [Maven](#maven) above (including the deps.dev timestamp lookup — plugin marker artifacts are indexed there under the Maven ecosystem). Malicious-package and allowlist entries are read from the shared `maven` ecosystem key, since OSV tracks Gradle plugin artifacts as Maven artifacts.
+Served under `/gradle-plugins`. The portal uses the same Maven m2 layout, so the path patterns and gating behaviour are identical to [Maven](#maven) above (including the deps.dev timestamp lookup — plugin marker artifacts are indexed there under the Maven ecosystem — and the `Last-Modified` fallback for versions deps.dev has no date for). Malicious-package and allowlist entries are read from the shared `maven` ecosystem key, since OSV tracks Gradle plugin artifacts as Maven artifacts.
